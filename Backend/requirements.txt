@@ -4,3 +4,4 @@ pandas
 python-multipart
 sqlalchemy
 psycopg2-binary
+supabase-python
