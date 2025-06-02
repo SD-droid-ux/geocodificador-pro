@@ -1,68 +1,50 @@
-from fastapi import FastAPI, Depends, HTTPException, status, UploadFile, File
-from fastapi.security import HTTPBasic, HTTPBasicCredentials
+from fastapi import FastAPI, UploadFile, File, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-import secrets
+from dotenv import load_dotenv
+import os
 import pandas as pd
-from io import BytesIO
-from sqlalchemy.orm import Session
-from database import SessionLocal, engine, Base
-from models import DataRow
-from crud import clear_data, insert_data
+from supabase import create_client, Client
+
+# Carregar variáveis de ambiente
+load_dotenv()
+SUPABASE_URL = os.getenv("SUPABASE_URL")
+SUPABASE_KEY = os.getenv("SUPABASE_KEY")
+
+supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
 app = FastAPI()
 
-# CORS para permitir frontend local e remoto
+# Permitir acesso de qualquer origem (útil para testes locais)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # ajuste depois para domínio específico
-    allow_credentials=True,
+    allow_origins=["*"],
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-security = HTTPBasic()
+@app.post("/upload")
+async def upload_excel(file: UploadFile = File(...)):
+    if not file.filename.endswith(".xlsx"):
+        raise HTTPException(status_code=400, detail="O arquivo deve ser um Excel (.xlsx)")
 
-# Login e senha fixos (troque aqui)
-USER = "usuario"
-PASSWORD = "senha123"
-
-# Dependency para DB
-def get_db():
-    db = SessionLocal()
     try:
-        yield db
-    finally:
-        db.close()
+        # Ler os dados do Excel para um DataFrame
+        df = pd.read_excel(file.file)
 
-def verify_credentials(credentials: HTTPBasicCredentials = Depends(security)):
-    correct_username = secrets.compare_digest(credentials.username, USER)
-    correct_password = secrets.compare_digest(credentials.password, PASSWORD)
-    if not (correct_username and correct_password):
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Usuário ou senha incorretos",
-            headers={"WWW-Authenticate": "Basic"},
-        )
-    return credentials.username
+        # Validação básica: precisa ter colunas latitude e longitude
+        if "latitude" not in df.columns or "longitude" not in df.columns:
+            raise HTTPException(status_code=400, detail="O arquivo deve conter colunas 'latitude' e 'longitude'.")
 
-@app.get("/")
-def read_root():
-    return {"message": "API Geocodificador funcionando!"}
+        # Apagar os dados anteriores
+        supabase.table("enderecos").delete().neq("id", 0).execute()
 
-@app.post("/upload-excel")
-def upload_excel(
-    file: UploadFile = File(...),
-    username: str = Depends(verify_credentials),
-    db: Session = Depends(get_db)
-):
-    if not file.filename.endswith((".xls", ".xlsx")):
-        raise HTTPException(status_code=400, detail="Arquivo deve ser Excel (.xls ou .xlsx)")
-    content = file.file.read()
-    df = pd.read_excel(BytesIO(content))
+        # Inserir os novos dados
+        data = df.to_dict(orient="records")
+        for row in data:
+            supabase.table("enderecos").insert(row).execute()
 
-    # Apaga dados antigos e insere novos
-    clear_data(db)
-    insert_data(db, df)
+        return {"status": "sucesso", "linhas_inseridas": len(data)}
 
-    return {"message": f"Arquivo {file.filename} importado com sucesso!", "rows": len(df)}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
